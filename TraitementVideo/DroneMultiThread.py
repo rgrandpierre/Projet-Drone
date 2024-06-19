@@ -56,11 +56,10 @@ def cropProcessFrame(frame):
     taille = 64
 
     lo = np.array([0, 85, 85])
-    hi = np.array([8, 255, 255])
+    hi = np.array([7, 255, 255])
     color_infos = (0, 255, 255)
     
     image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    #output_image = np.zeros_like(frame)
     output_image = np.zeros((128, 128), dtype=np.uint8)
     
     mask = cv2.inRange(image, lo, hi)
@@ -97,23 +96,40 @@ def cropProcessFrame(frame):
     # Vérifier si output_image est vide
     if output_image.shape[0] > 0 and output_image.shape[1] > 0:
         return output_image
-    #else:
-    #    return frame  # Retourner frame original si output_image est vide
+    else:
+        return None
     
 
 def process_frame(bebopVision, output_queue):
     print("Lancement du Thread process_frame")
+    previous_prediction = None
+    counter = 0
+    required_count = 3
+    
     while True:
         frame = bebopVision.get_latest_valid_picture()
         if frame is not None:
             
-            
             processed_frame = cropProcessFrame(frame)
-            
-            
             
             y_pred = processIA(processed_frame)
             print("Prédiction : ", y_pred)
+            
+            """
+            Vérifier s'il y a de bonne détection
+            Mettre un compteur jusqu'à 3 pour voir s'il y a une bonne détection
+            """
+            
+            if y_pred is not None:
+                if y_pred == previous_prediction:
+                    counter += 1
+                else:
+                    counter = 1
+                    previous_prediction = y_pred
+                
+                if counter == required_count:
+                    print(f"Bonne détection confirmée : Classe {y_pred}")
+                    counter = 0
             
             output_queue.put(processed_frame)
             time.sleep(0.25)
