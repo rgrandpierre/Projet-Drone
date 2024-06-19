@@ -33,30 +33,34 @@ model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metri
 
 def processIA(frame):
     
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    if frame is not None:
     
-    resized_frame = cv2.resize(rgb_frame, (img_width, img_height))
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
-    processed_frame = resized_frame / 255.0
+        resized_frame = cv2.resize(rgb_frame, (img_width, img_height))
     
-    input_image = np.expand_dims(processed_frame, axis=0)
+        processed_frame = resized_frame / 255.0
+    
+        input_image = np.expand_dims(processed_frame, axis=0)
     
     
-    try:
-        prediction = model.predict(input_image)
-        y_pred = np.argmax(prediction, axis=1)
+        try:
+            prediction = model.predict(input_image)
+            y_pred = np.argmax(prediction, axis=1)
 
-        return y_pred[0]
+            return y_pred[0]
     
-    except Exception as e:
-        print(f"Erreur: {e}")
+        except Exception as e:
+            print(f"Erreur: {e}")
+            return None
+    else:
         return None
 
 def cropProcessFrame(frame):
     taille = 64
 
     lo = np.array([0, 85, 85])
-    hi = np.array([7, 255, 255])
+    hi = np.array([6, 255, 255])
     color_infos = (0, 255, 255)
     
     image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -96,21 +100,24 @@ def cropProcessFrame(frame):
     # Vérifier si output_image est vide
     if output_image.shape[0] > 0 and output_image.shape[1] > 0:
         return output_image
-    else:
-        return None
+    #else:
+     #   return None
     
 
 def process_frame(bebopVision, output_queue):
     print("Lancement du Thread process_frame")
     previous_prediction = None
+    y_pred = None
     counter = 0
-    required_count = 3
+    required_count = 5
     
     while True:
         frame = bebopVision.get_latest_valid_picture()
         if frame is not None:
             
             processed_frame = cropProcessFrame(frame)
+            
+            print("taille image", processed_frame.shape)
             
             y_pred = processIA(processed_frame)
             print("Prédiction : ", y_pred)
@@ -132,7 +139,7 @@ def process_frame(bebopVision, output_queue):
                     counter = 0
             
             output_queue.put(processed_frame)
-            time.sleep(0.25)
+            time.sleep(0.1)
 
 
 def main():
