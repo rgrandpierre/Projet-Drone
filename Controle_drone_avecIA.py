@@ -1,0 +1,297 @@
+from pyparrot.Bebop import Bebop
+from pyparrot.DroneVision import DroneVision
+import time
+import threading
+
+import cv2
+import numpy as np
+from queue import Queue
+
+import tensorflow as tf
+from tensorflow.keras.optimizers import Adam
+
+
+batch_size = 32
+img_width, img_height = (128, 128)
+
+# Prédictions du modèle
+model = tf.keras.models.load_model('./model_IA_NewImages.h5', compile=False)
+
+optimizer = Adam()
+
+model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+
+
+def emergency_landing(bebop):
+    print("Atterrissage d'urgence déclenché !")
+    #bebop.emergency_land()
+
+def monitor_emergency(bebop, isStopping):
+    while True:
+        user_input = input("Tapez 'emergency' pour atterrissage d'urgence : ")
+        if user_input.lower() == 'emergency':
+            isStopping[0] = True
+            emergency_landing(bebop)
+            break
+
+
+
+def processIA(frame):
+    
+    if frame is not None:
+    
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+        resized_frame = cv2.resize(rgb_frame, (img_width, img_height))
+    
+        processed_frame = resized_frame / 255.0
+    
+        input_image = np.expand_dims(processed_frame, axis=0)
+    
+    
+        try:
+            prediction = model.predict(input_image)
+            y_pred = np.argmax(prediction, axis=1)
+
+            return y_pred[0]
+    
+        except Exception as e:
+            print(f"Erreur: {e}")
+            return None
+    else:
+        return None
+
+
+
+def cropProcessFrame(frame):
+    taille = 64
+
+    lo = np.array([0, 85, 85])
+    hi = np.array([7, 255, 255])
+    color_infos = (0, 255, 255)
+    
+    image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    output_image = np.zeros((128, 128), dtype=np.uint8)
+    
+    mask = cv2.inRange(image, lo, hi)
+    
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    
+    mask = cv2.erode(mask, kernel, iterations=2)
+    mask = cv2.dilate(mask, kernel, iterations=2)
+    
+    elements = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
+    
+    if len(elements) > 0:
+        c = max(elements, key=cv2.contourArea)
+        ((x, y), rayon) = cv2.minEnclosingCircle(c)
+        
+        if rayon > 30:
+            top_left = (int(x) - taille, int(y) - taille)
+            bottom_right = (int(x) + taille, int(y) + taille)
+            
+            # Gardes-fous pour éviter que le rectangle ne sorte de l'image
+            top_left = (max(top_left[0], 0), max(top_left[1], 0))
+            bottom_right = (min(bottom_right[0], image.shape[1]), min(bottom_right[1], image.shape[0]))
+            
+            # Vérifier que les coordonnées sont valides
+            if top_left[0] < bottom_right[0] and top_left[1] < bottom_right[1]:
+                # Dessiner un rectangle autour de la zone détectée (facultatif)
+                cv2.rectangle(image, top_left, bottom_right, color_infos, 1)
+                
+                # Extraire et retourner la région d'intérêt (ROI)
+                output_image = image[top_left[1]:bottom_right[1], top_left[0]:bottom_right[0]]
+                
+                output_image = cv2.cvtColor(output_image, cv2.COLOR_HSV2BGR)
+    
+    # Vérifier si output_image est vide
+    if output_image.shape[0] > 0 and output_image.shape[1] > 0:
+        return output_image
+    else:
+        return None
+
+
+
+""" Thread traitement VIDEO """
+def process_frame(bebopVision, isDetection, senariot, output_queue, stop_event):
+    print("Lancement du Thread process_frame")
+    
+    previous_prediction = None
+    y_pred = None
+    counter = 0
+    required_count = 5
+    
+    while not stop_event.is_set():
+        frame = bebopVision.get_latest_valid_picture()
+        if frame is not None:
+            
+            processed_frame = cropProcessFrame(frame)
+            
+            print("taille image", processed_frame.shape)
+            
+            y_pred = processIA(processed_frame)
+            print("Prédiction : ", y_pred)
+            
+            """
+            Vérifier s'il y a de bonne détection
+            Mettre un compteur jusqu'à 3 pour voir s'il y a une bonne détection
+            """
+            
+            if y_pred is not None:
+                if y_pred == previous_prediction:
+                    counter += 1
+                else:
+                    counter = 1
+                    previous_prediction = y_pred
+                
+                if counter == required_count:
+                    print(f"Bonne détection confirmée : Classe {y_pred}")
+                    counter = 0
+                    isDetection[0] = True
+                    senariot[0] = y_pred
+            
+            output_queue.put(processed_frame)
+            time.sleep(0.5)
+
+
+
+def main():
+    
+    isDetection = [False]
+    isStopping = [False]
+    senariot = [None]
+    
+    bebop = Bebop(drone_type="Bebop2", ip_address="192.168.42.1")
+
+    print("Connexion...")
+    success = bebop.connect(10)
+    print(success)
+    
+
+    if success:
+        # Démarrer un thread pour check l'atterrissage d'urgence
+        #monitor_emergency_thread =  threading.Thread(target=monitor_emergency, args=(bebop, isStopping), daemon=True).start()
+        bebop.set_max_altitude(5)
+        bebop.set_max_distance(10)
+        bebop.set_max_tilt(5)
+        bebop.set_max_vertical_speed(1)
+        bebop.enable_geofence(1)
+        
+        # Initialisation de la camera du drone
+        bebopVision = DroneVision(bebop, is_bebop=True)
+        
+        bebopVision.set_user_callback_function(None, user_callback_args=None)
+        
+        # Ouverture du flux video
+        bebopVision.open_video()
+        time.sleep(1)
+        
+        cv2.namedWindow("Bebop 2 Video Stream", cv2.WINDOW_NORMAL)
+        
+        # Queue pour communiquer entre les threads
+        output_queue = Queue()
+        # Création d'un événement pour arrêter le thread
+        stop_event = threading.Event()
+        # Création et démarrage du Thread
+        processing_thread = threading.Thread(target=process_frame, args=(bebopVision, isDetection, senariot, output_queue, stop_event), daemon=True).start()
+        
+        
+        print("Lancement du Thread manageDrone")
+        bebop.smart_sleep(2)
+        
+        print("ok1")
+        bebop.ask_for_state_update()
+        print("ok")
+        
+        while True:
+            # Get the frame from the video stream
+            frame = bebopVision.get_latest_valid_picture()
+            
+            #if frame is not None:
+
+                # Display the frame in the OpenCV window
+                #cv2.imshow("Bebop 2 Video Stream", frame)
+
+                # Check if the 'q' key is pressed to exit
+                #if cv2.waitKey(1) & 0xFF == ord('q'):
+                #    processing_thread.join()
+                #    break
+            
+            # Affichage de la sortie du Thread
+            #if not output_queue.empty():
+            #        processed_frame = output_queue.get()
+            #        cv2.imshow("Processed Bebop 2 Video Stream", processed_frame)
+            #        output_queue.task_done()
+            
+            
+            if isStopping[0]==False and isDetection[0]==True:
+                if (senariot[0] == 1):
+                    print("Sénariot 1")
+                    isDetection[0] = False
+                        
+                    """bebop.safe_takeoff(20)
+                    bebop.fly_direct(roll=0, pitch=10, yaw=0, vertical_movement=20, duration=1)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=90, vertical_movement=20, duration=7)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=90, vertical_movement=20, duration=7)
+                    bebop.smart_sleep(5)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=-90, vertical_movement=20, duration=7)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=0, vertical_movement=-20, duration=1)"""
+                
+                if (senariot[0] == 2):
+                    print("Sénariot 2")
+                    isDetection[0] = False
+                    print("Ne rien faire")
+                    
+                if (senariot[0] == 3):
+                    print("Sénariot 3")
+                    isDetection[0] = False
+                        
+                    """bebop.safe_takeoff(20)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=0, vertical_movement=20, duration=1)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=90, vertical_movement=20, duration=7)
+                    bebop.smart_sleep(5)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=-90, vertical_movement=20, duration=7)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=0, vertical_movement=-20, duration=1)"""
+            
+                if (senariot[0] == 4):
+                    print("Sénariot 4")
+                    isDetection[0] = False
+                        
+                    """bebop.safe_takeoff(20)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=0, vertical_movement=20, duration=1)
+                    bebop.fly_direct(roll=0, pitch=20, yaw=90, vertical_movement=20, duration=7)
+                    bebop.smart_sleep(5)
+                    bebop.fly_direct(roll=0, pitch=-20, yaw=-90, vertical_movement=20, duration=7)
+                    bebop.fly_direct(roll=0, pitch=0, yaw=0, vertical_movement=-20, duration=1)"""
+                    
+                if (senariot[0] == 5):
+                    print("Sénariot 5")
+                    isDetection[0] = False
+            
+                #bebop.safe_land(10)
+            else:
+                print("Arrêt du vol")
+                break
+        
+        # On stop le thread de détection
+        stop_event.set()
+
+        print("Fin")
+        bebopVision.close_video()
+        cv2.destroyAllWindows()
+        bebop.smart_sleep(5)
+        bebop.ask_for_state_update()
+        bebop.disconnect()
+        
+
+        
+    else:
+        print("Échec de la connexion au drone.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
